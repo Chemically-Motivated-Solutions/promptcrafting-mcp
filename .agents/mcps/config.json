@@ -1,1 +1,18 @@
-{"mcpServers": {}}
+{
+  "mcpServers": {
+    "promptcrafting-mcp": {
+      "url": "http://localhost:8787/mcp",
+      "headers": {
+        "Authorization": "Bearer <YOUR_JWT_TOKEN>"
+      }
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "."
+      ]
+    }
+  }
+}

@@ -1,0 +1,82 @@
+# CodeQL Advanced — Parrot MCP Server (promptcrafting-mcp)
+#
+# Scans: Python (src/, anthropic-nebius.py) + Actions (workflow injection detection)
+# Dropped: javascript-typescript (no JS/TS in this repo)
+#
+# NOTE on SHA pinning for codeql-action:
+#   GitHub explicitly recommends using the major version tag (v4) for CodeQL
+#   because server-side feature flags depend on version compatibility, and old
+#   pinned SHAs can silently lose functionality. This is a rare exception to
+#   our "SHA-pin everything" rule. actions/checkout IS SHA-pinned.
+#   Ref: https://github.com/github/codeql-action#readme
+
+name: "CodeQL"
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "*.md"
+      - "docs/**"
+      - "LICENSE"
+      - ".gitignore"
+      - ".github/ISSUE_TEMPLATE/**"
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - "*.md"
+      - "docs/**"
+      - "LICENSE"
+      - ".gitignore"
+      - ".github/ISSUE_TEMPLATE/**"
+  schedule:
+    # Weekly scan — Tuesdays 22:34 UTC (Wednesday 08:34 AEST)
+    - cron: "34 22 * * 2"
+
+# Workflow-level least privilege
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+
+    permissions:
+      security-events: write  # Upload SARIF results
+      packages: read          # Fetch CodeQL packs
+      actions: read           # Required for private repos + actions language
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Primary codebase: src/parrot_mcp_server/, anthropic-nebius.py
+          - language: python
+            build-mode: none
+          # Workflow injection / expression injection detection
+          # Ref: https://github.blog/security/application-security/how-to-secure-your-github-actions-workflows-with-codeql/
+          - language: actions
+            build-mode: none
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          # security-extended: broader query set beyond default security suite
+          # Catches data flow, taint tracking, and secondary injection vectors
+          queries: security-extended
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ matrix.language }}"

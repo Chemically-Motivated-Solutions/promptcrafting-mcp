@@ -16,15 +16,15 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
-    "agents": "^0.1.0",
+    "agents": "^0.8.5",
     "hono": "^4.7.0",
     "zod": "^3.24.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250307.0",
+    "eslint": "^9.0.0",
     "typescript": "^5.7.0",
-    "wrangler": "^4.0.0",
     "vitest": "^3.0.0",
-    "eslint": "^9.0.0"
+    "wrangler": "^4.77.0"
   }
 }

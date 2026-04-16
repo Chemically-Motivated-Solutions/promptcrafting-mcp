@@ -11,7 +11,7 @@
 //           via the exported trackToolCall helper after each tool execution.
 
 import { McpAgent } from "agents/mcp";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
 import type { Env } from "./types.js";
 import { registerPromptTools } from "./tools/prompt-tools.js";
 
@@ -26,11 +26,6 @@ interface AgentState {
 
 // ─── PromptMCPServer Durable Object ────────────────────────────────
 export class PromptMCPServer extends McpAgent<Env, AgentState> {
-  server = new McpServer({
-    name: "promptcrafting-mcp",
-    version: "1.0.0",
-  });
-
   // Called once when the DO is first instantiated
   async init(): Promise<void> {
     // Initialize session state
@@ -62,13 +57,14 @@ export class PromptMCPServer extends McpAgent<Env, AgentState> {
       "four_layer_prompt",
       {
         title: "Four-Layer Prompt Builder",
-        description: "Interactive prompt builder using the Objective → Role → Constraints → Output Shape stack",
-        argsSchema: {
-          objective: { type: "string" as const, description: "What the model should accomplish" },
-          role: { type: "string" as const, description: "Persona and domain expertise" },
-          constraints: { type: "string" as const, description: "Rules and boundaries" },
-          outputShape: { type: "string" as const, description: "Expected output format" },
-        },
+        description:
+          "Interactive prompt builder using the Objective → Role → Constraints → Output Shape stack",
+        argsSchema: z.object({
+          objective: z.string().describe("What the model should accomplish"),
+          role: z.string().describe("Persona and domain expertise"),
+          constraints: z.string().describe("Rules and boundaries"),
+          outputShape: z.string().describe("Expected output format"),
+        }),
       },
       async ({ objective, role, constraints, outputShape }) => ({
         messages: [
@@ -85,18 +81,19 @@ export class PromptMCPServer extends McpAgent<Env, AgentState> {
             },
           },
         ],
-      })
+      }),
     );
 
     this.server.registerPrompt(
       "security_assessment",
       {
         title: "Security Assessment Prompt",
-        description: "Pre-built prompt for vulnerability assessment with structured JSON output",
-        argsSchema: {
-          target: { type: "string" as const, description: "Target system or scan data identifier" },
-          scanData: { type: "string" as const, description: "Raw scan output to analyze" },
-        },
+        description:
+          "Pre-built prompt for vulnerability assessment with structured JSON output",
+        argsSchema: z.object({
+          target: z.string().describe("Target system or scan data identifier"),
+          scanData: z.string().describe("Raw scan output to analyze"),
+        }),
       },
       async ({ target, scanData }) => ({
         messages: [
@@ -124,11 +121,12 @@ export class PromptMCPServer extends McpAgent<Env, AgentState> {
             },
           },
         ],
-      })
+      }),
     );
 
     // Register resources (template catalog)
     this.server.registerResource(
+      "promptcraft://templates",
       {
         uri: "promptcraft://templates",
         name: "Template Catalog",
@@ -136,21 +134,18 @@ export class PromptMCPServer extends McpAgent<Env, AgentState> {
         mimeType: "application/json",
       },
       async () => {
-        const list = await this.env.PROMPT_TEMPLATES.list({ prefix: "template:", limit: 100 });
+        const list = await this.env.PROMPT_TEMPLATES.list({
+          prefix: "template:",
+          limit: 100,
+        });
         const templates = list.keys
           .filter((k) => !k.name.includes(":v"))
           .map((k) => ({
             id: k.name.replace("template:", ""),
             name: (k.metadata as Record<string, unknown>)?.name ?? "unknown",
           }));
-        return {
-          contents: [{
-            uri: "promptcraft://templates",
-            mimeType: "application/json",
-            text: JSON.stringify(templates, null, 2),
-          }],
-        };
-      }
+        return JSON.stringify(templates, null, 2);
+      },
     );
   }
 
@@ -166,7 +161,11 @@ export class PromptMCPServer extends McpAgent<Env, AgentState> {
   //
   // In practice, tools call this via the exported trackToolCall() helper below,
   // which receives a reference to the DO instance from the Hono request context.
-  async trackToolCall(toolName: string, inputHash: string, status: string): Promise<void> {
+  async trackToolCall(
+    toolName: string,
+    inputHash: string,
+    status: string,
+  ): Promise<void> {
     this.sql`
       INSERT INTO session_history (tool_name, input_hash, status)
       VALUES (${toolName}, ${inputHash}, ${status})

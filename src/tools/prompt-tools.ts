@@ -15,31 +15,53 @@
 //   - [HITL] Added promptcraft_resolve_hitl, promptcraft_get_hitl_status,
 //           promptcraft_list_pending_hitl tools
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type {
+  McpServer,
+  Tool,
+  ToolInputSchema,
+} from "@modelcontextprotocol/sdk/shared/types.js";
 import type { Env, PromptTemplate } from "../types.js";
 import {
-  CreateTemplateSchema, UpdateTemplateSchema, GetTemplateSchema,
-  ListTemplatesSchema, DeleteTemplateSchema, ExecutePromptSchema,
-  ValidatePromptSchema, QueryAuditSchema,
-  ResolveHITLSchema, GetHITLStatusSchema, ListPendingHITLSchema,
+  CreateTemplateSchema,
+  UpdateTemplateSchema,
+  GetTemplateSchema,
+  ListTemplatesSchema,
+  DeleteTemplateSchema,
+  ExecutePromptSchema,
+  ValidatePromptSchema,
+  QueryAuditSchema,
+  ResolveHITLSchema,
+  GetHITLStatusSchema,
+  ListPendingHITLSchema,
 } from "../schemas/index.js";
 import {
-  PromptTemplateBuilder, compilePrompt, verifyContent,
-  hashContent, signContent,
+  PromptTemplateBuilder,
+  compilePrompt,
+  verifyContent,
+  hashContent,
+  signContent,
 } from "../services/prompt-builder.js";
 import { sanitizeInput } from "../guardrails/input-sanitizer.js";
 import { validateOutput } from "../guardrails/output-validator.js";
 import {
-  writeAuditLog, writeGuardrailEvent, writeTemplateChange, queryAuditLogs,
+  writeAuditLog,
+  writeTemplateChange,
+  queryAuditLogs,
 } from "../services/audit.js";
 import {
-  requestHITLApproval, waitForHITLDecision, resolveHITLApproval,
-  getHITLApprovalStatus, listPendingHITLApprovals,
+  requestHITLApproval,
+  waitForHITLDecision,
+  resolveHITLApproval,
+  getHITLApprovalStatus,
+  listPendingHITLApprovals,
 } from "../services/hitl.js";
 
 // ─── Register All Tools ────────────────────────────────────────────
-export function registerPromptTools(server: McpServer, env: Env, userId: string): void {
-
+export function registerPromptTools(
+  server: McpServer,
+  env: Env,
+  userId: string,
+): void {
   // ═══════════════════════════════════════════════════════════════════
   // TEMPLATE MANAGEMENT TOOLS
   // ═══════════════════════════════════════════════════════════════════
@@ -67,7 +89,7 @@ Returns the template ID, version, and content hash.`,
         openWorldHint: false,
       },
     },
-    async (params) => {
+    async (params: Record<string, unknown>) => {
       const builder = new PromptTemplateBuilder();
       const template = await builder
         .name(params.name)
@@ -75,7 +97,9 @@ Returns the template ID, version, and content hash.`,
         .objective(params.objective)
         .role(params.role)
         .constraints(params.constraints ?? "Follow standard safety guidelines.")
-        .outputShape(params.outputShape ?? "Respond in well-structured plain text.")
+        .outputShape(
+          params.outputShape ?? "Respond in well-structured plain text.",
+        )
         .tags(params.tags ?? [])
         .model(params.model)
         .requiresHITL(params.requiresHITL ?? false)
@@ -86,13 +110,13 @@ Returns the template ID, version, and content hash.`,
       await env.PROMPT_TEMPLATES.put(
         `template:${template.id}`,
         JSON.stringify(template),
-        { metadata: { name: template.name, version: template.version } }
+        { metadata: { name: template.name, version: template.version } },
       );
       // Store versioned copy (90-day retention)
       await env.PROMPT_TEMPLATES.put(
         `template:${template.id}:v${template.version}`,
         JSON.stringify(template),
-        { expirationTtl: 60 * 60 * 24 * 90 }
+        { expirationTtl: 60 * 60 * 24 * 90 },
       );
 
       // Audit: record creation in template_changes (closes STRIDE-R gap)
@@ -106,19 +130,21 @@ Returns the template ID, version, and content hash.`,
       });
 
       return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            id: template.id,
-            name: template.name,
-            version: template.version,
-            contentHash: template.contentHash,
-            requiresHITL: template.requiresHITL,
-            created: true,
-          }),
-        }],
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              id: template.id,
+              name: template.name,
+              version: template.version,
+              contentHash: template.contentHash,
+              requiresHITL: template.requiresHITL,
+              created: true,
+            }),
+          },
+        ],
       };
-    }
+    },
   );
 
   server.registerTool(
@@ -129,69 +155,108 @@ Returns the template ID, version, and content hash.`,
 Optionally specify a version number to fetch a historical version.
 Returns the full template including all four layers and metadata.`,
       inputSchema: GetTemplateSchema,
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
     },
-    async (params) => {
+    async (params: Record<string, unknown>) => {
       const key = params.version
         ? `template:${params.templateId}:v${params.version}`
         : `template:${params.templateId}`;
 
-      const raw = await env.PROMPT_TEMPLATES.get(key, "json") as PromptTemplate | null;
+      const raw = (await env.PROMPT_TEMPLATES.get(
+        key,
+        "json",
+      )) as PromptTemplate | null;
       if (!raw) {
-        return { isError: true, content: [{ type: "text", text: `Template not found: ${params.templateId}` }] };
-      }
-
-      // Verify HMAC integrity
-      const compiledContent = [raw.layers.role, raw.layers.objective, raw.layers.constraints, raw.layers.outputShape].join("\n");
-      const valid = await verifyContent(compiledContent, raw.hmacSignature, env.TEMPLATE_HMAC_KEY);
-      if (!valid) {
-        console.error(`[SECURITY] HMAC verification failed for template ${params.templateId} — possible tampering`);
         return {
           isError: true,
-          content: [{ type: "text", text: "Template integrity check failed — content may have been tampered with" }],
+          content: [
+            { type: "text", text: `Template not found: ${params.templateId}` },
+          ],
         };
       }
 
-      return { content: [{ type: "text", text: JSON.stringify(raw, null, 2) }] };
-    }
+      // Verify HMAC integrity
+      const compiledContent = [
+        raw.layers.role,
+        raw.layers.objective,
+        raw.layers.constraints,
+        raw.layers.outputShape,
+      ].join("\n");
+      const valid = await verifyContent(
+        compiledContent,
+        raw.hmacSignature,
+        env.TEMPLATE_HMAC_KEY,
+      );
+      if (!valid) {
+        globalThis.console?.error?.(
+          `[SECURITY] HMAC verification failed for template ${params.templateId} — possible tampering`,
+        );
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: "Template integrity check failed — content may have been tampered with",
+            },
+          ],
+        };
+      }
+
+      return {
+        content: [{ type: "text", text: JSON.stringify(raw, null, 2) }],
+      };
+    },
   );
 
   server.registerTool(
     "promptcraft_list_templates",
     {
       title: "List Prompt Templates",
-      description: "List available prompt templates with optional tag filtering and pagination.",
+      description:
+        "List available prompt templates with optional tag filtering and pagination.",
       inputSchema: ListTemplatesSchema,
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
     },
-    async (params) => {
+    async (params: Record<string, unknown>) => {
       const listResult = await env.PROMPT_TEMPLATES.list({
         prefix: "template:",
-        limit: params.limit ?? 20,
-        cursor: params.cursor,
+        limit: (params.limit as number) ?? 20,
+        cursor: params.cursor as string | undefined,
       });
 
       // Filter out versioned keys (they contain :v)
       const templates = listResult.keys
-        .filter((k) => !k.name.includes(":v"))
-        .map((k) => ({
-          id: k.name.replace("template:", ""),
+        .filter((k: Record<string, unknown>) => !String(k.name).includes(":v"))
+        .map((k: Record<string, unknown>) => ({
+          id: String(k.name).replace("template:", ""),
           name: (k.metadata as Record<string, unknown>)?.name ?? "unknown",
           version: (k.metadata as Record<string, unknown>)?.version ?? 1,
         }));
 
       return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            templates,
-            count: templates.length,
-            cursor: listResult.list_complete ? null : listResult.cursor,
-            hasMore: !listResult.list_complete,
-          }),
-        }],
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              templates,
+              count: templates.length,
+              cursor: listResult.list_complete ? null : listResult.cursor,
+              hasMore: !listResult.list_complete,
+            }),
+          },
+        ],
       };
-    }
+    },
   );
 
   server.registerTool(
@@ -204,23 +269,47 @@ The deletion is recorded in the template_changes audit table in D1 with the acti
 Returns an error if the template does not exist (idempotent deletes are intentionally rejected
 to prevent silent double-delete from masking replay attacks).`,
       inputSchema: DeleteTemplateSchema,
-      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
     },
-    async (params) => {
-      const raw = await env.PROMPT_TEMPLATES.get(`template:${params.templateId}`, "json") as PromptTemplate | null;
+    async (params: Record<string, unknown>) => {
+      const raw = (await env.PROMPT_TEMPLATES.get(
+        `template:${params.templateId}`,
+        "json",
+      )) as PromptTemplate | null;
 
       if (!raw) {
         return {
           isError: true,
-          content: [{ type: "text", text: `Template not found: ${params.templateId}. Cannot delete a non-existent template.` }],
+          content: [
+            {
+              type: "text",
+              text: `Template not found: ${params.templateId}. Cannot delete a non-existent template.`,
+            },
+          ],
         };
       }
 
-      const compiledContent = [raw.layers.role, raw.layers.objective, raw.layers.constraints, raw.layers.outputShape].join("\n");
-      const hmacValid = await verifyContent(compiledContent, raw.hmacSignature, env.TEMPLATE_HMAC_KEY);
+      const compiledContent = [
+        raw.layers.role,
+        raw.layers.objective,
+        raw.layers.constraints,
+        raw.layers.outputShape,
+      ].join("\n");
+      const hmacValid = await verifyContent(
+        compiledContent,
+        raw.hmacSignature,
+        env.TEMPLATE_HMAC_KEY,
+      );
 
       if (!hmacValid) {
-        console.error(`[SECURITY] Deleting template ${params.templateId} with FAILED HMAC — content was tampered with before deletion`);
+        globalThis.console?.error?.(
+          `[SECURITY] Deleting template ${params.templateId} with FAILED HMAC — content was tampered with before deletion`,
+        );
       }
 
       await env.PROMPT_TEMPLATES.delete(`template:${params.templateId}`);
@@ -235,18 +324,20 @@ to prevent silent double-delete from masking replay attacks).`,
       });
 
       return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            deleted: true,
-            id: params.templateId,
-            version: raw.version,
-            hmacValidAtDeletion: hmacValid,
-            note: "Primary key removed. Versioned copies retained for audit compliance.",
-          }),
-        }],
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              deleted: true,
+              id: params.templateId,
+              version: raw.version,
+              hmacValidAtDeletion: hmacValid,
+              note: "Primary key removed. Versioned copies retained for audit compliance.",
+            }),
+          },
+        ],
       };
-    }
+    },
   );
 
   server.registerTool(
@@ -258,22 +349,51 @@ Increments the version, re-signs with HMAC, and stores both the updated latest
 and a new versioned copy. Previous version is retained in KV for audit compliance.
 Partial updates are supported — only supply the fields you want to change.`,
       inputSchema: UpdateTemplateSchema,
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
     },
-    async (params) => {
-      const raw = await env.PROMPT_TEMPLATES.get(`template:${params.templateId}`, "json") as PromptTemplate | null;
+    async (params: Record<string, unknown>) => {
+      const raw = (await env.PROMPT_TEMPLATES.get(
+        `template:${params.templateId}`,
+        "json",
+      )) as PromptTemplate | null;
       if (!raw) {
-        return { isError: true, content: [{ type: "text", text: `Template not found: ${params.templateId}` }] };
+        return {
+          isError: true,
+          content: [
+            { type: "text", text: `Template not found: ${params.templateId}` },
+          ],
+        };
       }
 
       // Verify existing HMAC before mutation
-      const existingContent = [raw.layers.role, raw.layers.objective, raw.layers.constraints, raw.layers.outputShape].join("\n");
-      const existingHmacValid = await verifyContent(existingContent, raw.hmacSignature, env.TEMPLATE_HMAC_KEY);
+      const existingContent = [
+        raw.layers.role,
+        raw.layers.objective,
+        raw.layers.constraints,
+        raw.layers.outputShape,
+      ].join("\n");
+      const existingHmacValid = await verifyContent(
+        existingContent,
+        raw.hmacSignature,
+        env.TEMPLATE_HMAC_KEY,
+      );
       if (!existingHmacValid) {
-        console.error(`[SECURITY] Update attempted on tampered template ${params.templateId}`);
+        globalThis.console?.error?.(
+          `[SECURITY] Update attempted on tampered template ${params.templateId}`,
+        );
         return {
           isError: true,
-          content: [{ type: "text", text: "Template integrity check failed — cannot update a tampered template" }],
+          content: [
+            {
+              type: "text",
+              text: "Template integrity check failed — cannot update a tampered template",
+            },
+          ],
         };
       }
 
@@ -289,7 +409,10 @@ Partial updates are supported — only supply the fields you want to change.`,
         description: params.description ?? raw.description,
         tags: params.tags ?? raw.tags,
         model: params.model ?? raw.model,
-        requiresHITL: params.requiresHITL !== undefined ? params.requiresHITL : raw.requiresHITL,
+        requiresHITL:
+          params.requiresHITL !== undefined
+            ? params.requiresHITL
+            : raw.requiresHITL,
         version: raw.version + 1,
         updatedAt: new Date().toISOString(),
       };
@@ -302,18 +425,26 @@ Partial updates are supported — only supply the fields you want to change.`,
         updatedTemplate.layers.outputShape,
       ].join("\n");
       updatedTemplate.contentHash = await hashContent(newContent);
-      updatedTemplate.hmacSignature = await signContent(newContent, env.TEMPLATE_HMAC_KEY);
+      updatedTemplate.hmacSignature = await signContent(
+        newContent,
+        env.TEMPLATE_HMAC_KEY,
+      );
 
       // Store updated template (latest + versioned)
       await env.PROMPT_TEMPLATES.put(
         `template:${updatedTemplate.id}`,
         JSON.stringify(updatedTemplate),
-        { metadata: { name: updatedTemplate.name, version: updatedTemplate.version } }
+        {
+          metadata: {
+            name: updatedTemplate.name,
+            version: updatedTemplate.version,
+          },
+        },
       );
       await env.PROMPT_TEMPLATES.put(
         `template:${updatedTemplate.id}:v${updatedTemplate.version}`,
         JSON.stringify(updatedTemplate),
-        { expirationTtl: 60 * 60 * 24 * 90 }
+        { expirationTtl: 60 * 60 * 24 * 90 },
       );
 
       // Audit trail
@@ -327,19 +458,21 @@ Partial updates are supported — only supply the fields you want to change.`,
       });
 
       return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            id: updatedTemplate.id,
-            name: updatedTemplate.name,
-            version: updatedTemplate.version,
-            contentHash: updatedTemplate.contentHash,
-            requiresHITL: updatedTemplate.requiresHITL,
-            updated: true,
-          }),
-        }],
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              id: updatedTemplate.id,
+              name: updatedTemplate.name,
+              version: updatedTemplate.version,
+              contentHash: updatedTemplate.contentHash,
+              requiresHITL: updatedTemplate.requiresHITL,
+              updated: true,
+            }),
+          },
+        ],
       };
-    }
+    },
   );
 
   // ═══════════════════════════════════════════════════════════════════
@@ -364,34 +497,67 @@ Partial updates are supported — only supply the fields you want to change.`,
 Returns the model output, guardrail results, and usage metrics.
 Fail-closed: if any guardrail fails, the output is NOT returned.`,
       inputSchema: ExecutePromptSchema,
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
     },
-    async (params) => {
-      const requestId = crypto.randomUUID();
+    async (params: Record<string, unknown>) => {
+      const requestId =
+        globalThis.crypto?.getRandomValues(new Uint8Array(16)) ??
+        Array(16).fill(0);
       const startTime = Date.now();
 
       // ── Step 1: Load and verify template ──────────────────────────
       const key = params.templateVersion
         ? `template:${params.templateId}:v${params.templateVersion}`
         : `template:${params.templateId}`;
-      const template = await env.PROMPT_TEMPLATES.get(key, "json") as PromptTemplate | null;
+      const template = (await env.PROMPT_TEMPLATES.get(
+        key,
+        "json",
+      )) as PromptTemplate | null;
 
       if (!template) {
-        return { isError: true, content: [{ type: "text", text: `Template not found: ${params.templateId}` }] };
+        return {
+          isError: true,
+          content: [
+            { type: "text", text: `Template not found: ${params.templateId}` },
+          ],
+        };
       }
 
-      const compiledContent = [template.layers.role, template.layers.objective, template.layers.constraints, template.layers.outputShape].join("\n");
-      const hmacValid = await verifyContent(compiledContent, template.hmacSignature, env.TEMPLATE_HMAC_KEY);
+      const compiledContent = [
+        template.layers.role,
+        template.layers.objective,
+        template.layers.constraints,
+        template.layers.outputShape,
+      ].join("\n");
+      const hmacValid = await verifyContent(
+        compiledContent,
+        template.hmacSignature,
+        env.TEMPLATE_HMAC_KEY,
+      );
       if (!hmacValid) {
         await writeAuditLog(env.AUDIT_DB, {
-          requestId, sessionId: null, templateId: params.templateId,
-          templateVersion: template.version, userId, model: params.model ?? "none",
-          status: "filtered", latencyMs: Date.now() - startTime,
-          inputTokens: 0, outputTokens: 0,
+          requestId,
+          sessionId: null,
+          templateId: params.templateId,
+          templateVersion: template.version,
+          userId,
+          model: params.model ?? "none",
+          status: "filtered",
+          latencyMs: Date.now() - startTime,
+          inputTokens: 0,
+          outputTokens: 0,
           guardrailFlags: JSON.stringify({ hmacFailed: true }),
           createdAt: new Date().toISOString(),
         });
-        return { isError: true, content: [{ type: "text", text: "Template integrity check failed" }] };
+        return {
+          isError: true,
+          content: [{ type: "text", text: "Template integrity check failed" }],
+        };
       }
 
       // ── Step 2: HITL gate (SPEC KIT A3: Approval Bypass / REQUIRE_HITL) ──
@@ -402,7 +568,9 @@ Fail-closed: if any guardrail fails, the output is NOT returned.`,
         const timeoutMs = parseInt(env.HITL_TIMEOUT_MS || "300000", 10);
 
         // Hash variables so we audit context without exposing values
-        const variablesHash = await hashContent(JSON.stringify(params.variables));
+        const variablesHash = await hashContent(
+          JSON.stringify(params.variables),
+        );
 
         // Write pending approval record
         await requestHITLApproval(env.AUDIT_DB, {
@@ -414,19 +582,32 @@ Fail-closed: if any guardrail fails, the output is NOT returned.`,
           timeoutMs,
         });
 
-        console.log(`[HITL] Approval requested for ${requestId} (template: ${template.name}, timeout: ${timeoutMs}ms)`);
+        globalThis.console?.log?.(
+          `[HITL] Approval requested for ${requestId} (template: ${template.name}, timeout: ${timeoutMs}ms)`,
+        );
 
         // Block until approved, rejected, or timed out
-        const decision = await waitForHITLDecision(env.AUDIT_DB, requestId, timeoutMs);
+        const decision = await waitForHITLDecision(
+          env.AUDIT_DB,
+          requestId,
+          timeoutMs,
+        );
 
         if (!decision.approved) {
-          const status = decision.reason === "timed_out" ? "hitl_timeout" : "hitl_rejected";
+          const status =
+            decision.reason === "timed_out" ? "hitl_timeout" : "hitl_rejected";
 
           await writeAuditLog(env.AUDIT_DB, {
-            requestId, sessionId: null, templateId: params.templateId,
-            templateVersion: template.version, userId, model: params.model ?? "none",
-            status, latencyMs: Date.now() - startTime,
-            inputTokens: 0, outputTokens: 0,
+            requestId,
+            sessionId: null,
+            templateId: params.templateId,
+            templateVersion: template.version,
+            userId,
+            model: params.model ?? "none",
+            status,
+            latencyMs: Date.now() - startTime,
+            inputTokens: 0,
+            outputTokens: 0,
             guardrailFlags: JSON.stringify({
               hitlGate: true,
               decision: decision.reason,
@@ -435,14 +616,17 @@ Fail-closed: if any guardrail fails, the output is NOT returned.`,
             createdAt: new Date().toISOString(),
           });
 
-          const message = decision.reason === "timed_out"
-            ? `Execution blocked: HITL approval timed out after ${timeoutMs}ms. Request ${requestId} routed to dead-letter queue.`
-            : `Execution blocked: HITL approval rejected by ${decision.resolvedBy ?? "reviewer"}.`;
+          const message =
+            decision.reason === "timed_out"
+              ? `Execution blocked: HITL approval timed out after ${timeoutMs}ms. Request ${requestId} routed to dead-letter queue.`
+              : `Execution blocked: HITL approval rejected by ${decision.resolvedBy ?? "reviewer"}.`;
 
           return { isError: true, content: [{ type: "text", text: message }] };
         }
 
-        console.log(`[HITL] Approved for ${requestId} by ${decision.resolvedBy}`);
+        globalThis.console?.log?.(
+          `[HITL] Approved for ${requestId} by ${decision.resolvedBy}`,
+        );
       }
 
       // ── Step 3: Sanitize user input ───────────────────────────────
@@ -452,49 +636,79 @@ Fail-closed: if any guardrail fails, the output is NOT returned.`,
         });
         if (!verdict.pass) {
           await writeAuditLog(env.AUDIT_DB, {
-            requestId, sessionId: null, templateId: params.templateId,
-            templateVersion: template.version, userId, model: params.model ?? "none",
-            status: "filtered", latencyMs: Date.now() - startTime,
-            inputTokens: 0, outputTokens: 0,
+            requestId,
+            sessionId: null,
+            templateId: params.templateId,
+            templateVersion: template.version,
+            userId,
+            model: params.model ?? "none",
+            status: "filtered",
+            latencyMs: Date.now() - startTime,
+            inputTokens: 0,
+            outputTokens: 0,
             guardrailFlags: JSON.stringify({ inputBlocked: true, threats }),
             createdAt: new Date().toISOString(),
           });
-          return { isError: true, content: [{ type: "text", text: `Input rejected: ${verdict.reason}` }] };
+          return {
+            isError: true,
+            content: [
+              { type: "text", text: `Input rejected: ${verdict.reason}` },
+            ],
+          };
         }
       }
 
       // ── Step 4: Compile prompt ────────────────────────────────────
-      const { systemPrompt, userPrompt, canaryToken } = compilePrompt(template, {
-        userInput: params.userInput,
-        variables: params.variables,
-        sandwichDefense: params.sandwichDefense,
-      });
+      const { systemPrompt, userPrompt, canaryToken } = compilePrompt(
+        template,
+        {
+          userInput: params.userInput,
+          variables: params.variables,
+          sandwichDefense: params.sandwichDefense,
+        },
+      );
 
       // ── Step 5: Run inference ─────────────────────────────────────
-      const model = params.model || template.model || "@cf/meta/llama-4-scout-17b-16e-instruct";
+      const model =
+        (params.model as string) ||
+        template.model ||
+        "@cf/meta/llama-4-scout-17b-16e-instruct";
       let rawOutput: string;
       try {
-        const aiResult = await env.AI.run(model as BaseAiTextGenerationModels, {
+        const aiResult = await env.AI.run(model as unknown as "unknown", {
           messages: [
             { role: "system", content: systemPrompt },
-            ...(userPrompt ? [{ role: "user" as const, content: userPrompt }] : []),
+            ...(userPrompt
+              ? [{ role: "user" as const, content: userPrompt }]
+              : []),
           ],
           max_tokens: params.maxTokens,
         });
-        rawOutput = typeof aiResult === "string"
-          ? aiResult
-          : (aiResult as Record<string, unknown>).response as string ?? "";
+        rawOutput =
+          typeof aiResult === "string"
+            ? aiResult
+            : (((aiResult as Record<string, unknown>).response as string) ??
+              "");
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);
         await writeAuditLog(env.AUDIT_DB, {
-          requestId, sessionId: null, templateId: params.templateId,
-          templateVersion: template.version, userId, model,
-          status: "error", latencyMs: Date.now() - startTime,
-          inputTokens: 0, outputTokens: 0,
+          requestId,
+          sessionId: null,
+          templateId: params.templateId,
+          templateVersion: template.version,
+          userId,
+          model,
+          status: "error",
+          latencyMs: Date.now() - startTime,
+          inputTokens: 0,
+          outputTokens: 0,
           guardrailFlags: JSON.stringify({ inferenceError: errMsg }),
           createdAt: new Date().toISOString(),
         });
-        return { isError: true, content: [{ type: "text", text: `Inference failed: ${errMsg}` }] };
+        return {
+          isError: true,
+          content: [{ type: "text", text: `Inference failed: ${errMsg}` }],
+        };
       }
 
       // ── Step 6: Validate output ───────────────────────────────────
@@ -505,40 +719,59 @@ Fail-closed: if any guardrail fails, the output is NOT returned.`,
 
       if (!outputValidation.pass) {
         await writeAuditLog(env.AUDIT_DB, {
-          requestId, sessionId: null, templateId: params.templateId,
-          templateVersion: template.version, userId, model,
-          status: "filtered", latencyMs: Date.now() - startTime,
-          inputTokens: 0, outputTokens: 0,
+          requestId,
+          sessionId: null,
+          templateId: params.templateId,
+          templateVersion: template.version,
+          userId,
+          model,
+          status: "filtered",
+          latencyMs: Date.now() - startTime,
+          inputTokens: 0,
+          outputTokens: 0,
           guardrailFlags: JSON.stringify(outputValidation.verdicts),
           createdAt: new Date().toISOString(),
         });
-        return { isError: true, content: [{ type: "text", text: "Output blocked by security guardrails" }] };
+        return {
+          isError: true,
+          content: [
+            { type: "text", text: "Output blocked by security guardrails" },
+          ],
+        };
       }
 
       // ── Step 7: Audit log (success path) ─────────────────────────
       const latencyMs = Date.now() - startTime;
       await writeAuditLog(env.AUDIT_DB, {
-        requestId, sessionId: null, templateId: params.templateId,
-        templateVersion: template.version, userId, model,
-        status: "success", latencyMs,
-        inputTokens: 0, outputTokens: 0,
+        requestId,
+        sessionId: null,
+        templateId: params.templateId,
+        templateVersion: template.version,
+        userId,
+        model,
+        status: "success",
+        latencyMs,
+        inputTokens: 0,
+        outputTokens: 0,
         guardrailFlags: JSON.stringify(outputValidation.verdicts),
         createdAt: new Date().toISOString(),
       });
 
       return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            requestId,
-            output: outputValidation.output,
-            model,
-            latencyMs,
-            guardrails: outputValidation.verdicts,
-          }),
-        }],
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              requestId,
+              output: outputValidation.output,
+              model,
+              latencyMs,
+              guardrails: outputValidation.verdicts,
+            }),
+          },
+        ],
       };
-    }
+    },
   );
 
   // ═══════════════════════════════════════════════════════════════════
@@ -561,35 +794,47 @@ this call returns an error — double-resolution is rejected by design.
 
 SPEC KIT: A3 Approval Bypass / REQUIRE_HITL`,
       inputSchema: ResolveHITLSchema,
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
     },
-    async (params) => {
+    async (params: Record<string, unknown>) => {
       const result = await resolveHITLApproval(
         env.AUDIT_DB,
-        params.requestId,
-        params.resolution,
-        userId
+        params.requestId as string,
+        params.resolution as string,
+        userId,
       );
 
       if (!result.ok) {
         return {
           isError: true,
-          content: [{ type: "text", text: result.error ?? "Failed to resolve HITL approval" }],
+          content: [
+            {
+              type: "text",
+              text: result.error ?? "Failed to resolve HITL approval",
+            },
+          ],
         };
       }
 
       return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            requestId: params.requestId,
-            resolution: params.resolution,
-            resolvedBy: userId,
-            resolvedAt: new Date().toISOString(),
-          }),
-        }],
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              requestId: params.requestId,
+              resolution: params.resolution,
+              resolvedBy: userId,
+              resolvedAt: new Date().toISOString(),
+            }),
+          },
+        ],
       };
-    }
+    },
   );
 
   server.registerTool(
@@ -600,22 +845,35 @@ SPEC KIT: A3 Approval Bypass / REQUIRE_HITL`,
 Returns the current status (pending/approved/rejected/timed_out),
 expiry time, resolution details, and original request context.`,
       inputSchema: GetHITLStatusSchema,
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
     },
-    async (params) => {
-      const status = await getHITLApprovalStatus(env.AUDIT_DB, params.requestId);
+    async (params: Record<string, unknown>) => {
+      const status = await getHITLApprovalStatus(
+        env.AUDIT_DB,
+        params.requestId as string,
+      );
 
       if (!status) {
         return {
           isError: true,
-          content: [{ type: "text", text: `HITL request not found: ${params.requestId}` }],
+          content: [
+            {
+              type: "text",
+              text: `HITL request not found: ${params.requestId}`,
+            },
+          ],
         };
       }
 
       return {
         content: [{ type: "text", text: JSON.stringify(status, null, 2) }],
       };
-    }
+    },
   );
 
   server.registerTool(
@@ -627,21 +885,35 @@ Used by admin/operator dashboards to surface outstanding execution approvals.
 Returns request ID, template ID, requesting user, expiry time, and context summary.
 Expired and terminal requests are excluded — use promptcraft_query_audit for history.`,
       inputSchema: ListPendingHITLSchema,
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
     },
-    async (params) => {
-      const pending = await listPendingHITLApprovals(env.AUDIT_DB, params.limit ?? 50);
+    async (params: Record<string, unknown>) => {
+      const pending = await listPendingHITLApprovals(
+        env.AUDIT_DB,
+        (params.limit as number) ?? 50,
+      );
 
       return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            pending,
-            count: pending.length,
-          }, null, 2),
-        }],
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                pending,
+                count: pending.length,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
       };
-    }
+    },
   );
 
   // ═══════════════════════════════════════════════════════════════════
@@ -655,20 +927,44 @@ Expired and terminal requests are excluded — use promptcraft_query_audit for h
       description: `Dry-run validation of user input against a template without executing inference.
 Returns sanitization results, detected threats, compiled prompt preview, and template integrity status.`,
       inputSchema: ValidatePromptSchema,
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
     },
-    async (params) => {
-      const template = await env.PROMPT_TEMPLATES.get(`template:${params.templateId}`, "json") as PromptTemplate | null;
+    async (params: Record<string, unknown>) => {
+      const template = (await env.PROMPT_TEMPLATES.get(
+        `template:${params.templateId}`,
+        "json",
+      )) as PromptTemplate | null;
       if (!template) {
-        return { isError: true, content: [{ type: "text", text: `Template not found: ${params.templateId}` }] };
+        return {
+          isError: true,
+          content: [
+            { type: "text", text: `Template not found: ${params.templateId}` },
+          ],
+        };
       }
 
       // Verify HMAC
-      const compiledContent = [template.layers.role, template.layers.objective, template.layers.constraints, template.layers.outputShape].join("\n");
-      const hmacValid = await verifyContent(compiledContent, template.hmacSignature, env.TEMPLATE_HMAC_KEY);
+      const compiledContent = [
+        template.layers.role,
+        template.layers.objective,
+        template.layers.constraints,
+        template.layers.outputShape,
+      ].join("\n");
+      const hmacValid = await verifyContent(
+        compiledContent,
+        template.hmacSignature,
+        env.TEMPLATE_HMAC_KEY,
+      );
 
       // Sanitize input
-      const { sanitized, verdict, threats } = sanitizeInput(params.userInput);
+      const { sanitized, verdict, threats } = sanitizeInput(
+        params.userInput as string,
+      );
 
       // Compile prompt (for preview)
       const { systemPrompt, userPrompt } = compilePrompt(template, {
@@ -677,23 +973,31 @@ Returns sanitization results, detected threats, compiled prompt preview, and tem
       });
 
       return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            templateIntegrity: hmacValid ? "verified" : "FAILED — possible tampering",
-            requiresHITL: template.requiresHITL,
-            inputValidation: verdict,
-            threats,
-            promptPreview: {
-              systemPromptLength: systemPrompt.length,
-              userPromptLength: userPrompt.length,
-              // Do NOT expose full system prompt — leakage risk
-              systemPromptHash: await hashContent(systemPrompt),
-            },
-          }, null, 2),
-        }],
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                templateIntegrity: hmacValid
+                  ? "verified"
+                  : "FAILED — possible tampering",
+                requiresHITL: template.requiresHITL,
+                inputValidation: verdict,
+                threats,
+                promptPreview: {
+                  systemPromptLength: systemPrompt.length,
+                  userPromptLength: userPrompt.length,
+                  // Do NOT expose full system prompt — leakage risk
+                  systemPromptHash: await hashContent(systemPrompt),
+                },
+              },
+              null,
+              2,
+            ),
+          },
+        ],
       };
-    }
+    },
   );
 
   // ═══════════════════════════════════════════════════════════════════
@@ -707,11 +1011,19 @@ Returns sanitization results, detected threats, compiled prompt preview, and tem
       description: `Query the prompt execution audit trail with filters for user, template, status, and time range.
 Status values include hitl_rejected and hitl_timeout for HITL gate decisions.`,
       inputSchema: QueryAuditSchema,
-      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
     },
-    async (params) => {
-      const result = await queryAuditLogs(env.AUDIT_DB, params);
+    async (params: Record<string, unknown>) => {
+      const result = await queryAuditLogs(
+        env.AUDIT_DB,
+        params as Record<string, unknown>,
+      );
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
-    }
+    },
   );
 }
