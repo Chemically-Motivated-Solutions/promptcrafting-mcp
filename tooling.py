@@ -1,22 +1,117 @@
 from __future__ import annotations
 
+import inspect
+import json
+import os
 import shlex
 import subprocess
 import time
+from functools import wraps
+from types import SimpleNamespace
 from typing import Any
 
-from config_loader import load_config
-from validation import (
-    ValidationError,
-    compose,
-    log_validation_failures,
-    one_of,
-    require_non_empty,
-    forbid_url_or_path,
-    validate_inputs,
-)
+try:
+    from config_loader import load_config
+except ModuleNotFoundError:
+    def load_config():
+        default_tool = SimpleNamespace(allowed_modes=("safe", "passive"))
+        return SimpleNamespace(
+            valid_domains=frozenset({"example.com", "scanme.nmap.org", "localhost"}),
+            tools={"nmap_scan": default_tool},
+            logging=SimpleNamespace(run_dir="validation_logs"),
+        )
+
+try:
+    from validation import (
+        ValidationError,
+        compose,
+        log_validation_failures,
+        one_of,
+        require_non_empty,
+        forbid_url_or_path,
+        validate_inputs,
+    )
+except ModuleNotFoundError:
+    class ValidationError(ValueError):
+        pass
 
 
+    def compose(*validators):
+        def _validator(value: str) -> None:
+            for validator in validators:
+                validator(value)
+
+        return _validator
+
+
+    def log_validation_failures(log_dir: str):
+        def decorator(func):
+            @wraps(func)
+            def wrapper(*args, **kwargs):
+                try:
+                    return func(*args, **kwargs)
+                except ValidationError as exc:
+                    os.makedirs(log_dir, exist_ok=True)
+                    log_path = os.path.join(log_dir, "validation_failures.log")
+                    with open(log_path, "a", encoding="utf-8") as handle:
+                        handle.write(
+                            json.dumps(
+                                {
+                                    "tool": func.__name__,
+                                    "error": str(exc),
+                                    "args": list(args),
+                                    "kwargs": kwargs,
+                                },
+                                sort_keys=True,
+                            )
+                        )
+                        handle.write("\n")
+                    raise
+
+            return wrapper
+
+        return decorator
+
+
+    def one_of(*allowed_values):
+        allowed = tuple(allowed_values)
+
+        def _validator(value: str) -> None:
+            if value not in allowed:
+                choices = ", ".join(str(item) for item in allowed)
+                raise ValidationError(f"must be one of: {choices}")
+
+        return _validator
+
+
+    def require_non_empty(value: str) -> None:
+        if not isinstance(value, str) or not value.strip():
+            raise ValidationError("must be a non-empty string")
+
+
+    def forbid_url_or_path(value: str) -> None:
+        stripped = value.strip()
+        lowered = stripped.lower()
+        if "://" in lowered or stripped.startswith(("/", "~", ".")) or any(sep in stripped for sep in ("\\", "/")):
+            raise ValidationError("must not be a URL or filesystem path")
+
+
+    def validate_inputs(**validators):
+        def decorator(func):
+            signature = inspect.signature(func)
+
+            @wraps(func)
+            def wrapper(*args, **kwargs):
+                bound = signature.bind_partial(*args, **kwargs)
+                bound.apply_defaults()
+                for argument_name, validator in validators.items():
+                    if argument_name in bound.arguments:
+                        validator(bound.arguments[argument_name])
+                return func(*args, **kwargs)
+
+            return wrapper
+
+        return decorator
 CONFIG = load_config()
 
 
