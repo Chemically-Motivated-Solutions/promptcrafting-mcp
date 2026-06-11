@@ -176,7 +176,7 @@ def _build_nmap_command(target: str, mode: str) -> list[str]:
     
     Parameters:
         target (str): Host or domain to scan; the value will be normalized (trimmed and lowercased).
-    	mode (str): Scan mode; "safe" for a top-ports scan, "passive" for a host-discovery scan.
+        mode (str): Scan mode; "safe" for a top-ports scan, "passive" for a host-discovery scan.
     
     Returns:
     	command_args (list[str]): The argv-style list suitable for subprocess (e.g. ["nmap", ... , target]).
