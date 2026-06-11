@@ -175,7 +175,7 @@ def _build_nmap_command(target: str, mode: str) -> list[str]:
     Builds the nmap command argument list for the given target and scan mode.
     
     Parameters:
-    	target (str): Host or domain to scan; the value will be normalized (trimmed and lowercased).
+        target (str): Host or domain to scan; the value will be normalized (trimmed and lowercased).
     	mode (str): Scan mode; "safe" for a top-ports scan, "passive" for a host-discovery scan.
     
     Returns:
